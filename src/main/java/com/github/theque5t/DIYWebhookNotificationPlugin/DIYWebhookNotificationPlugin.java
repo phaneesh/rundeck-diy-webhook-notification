@@ -31,39 +31,22 @@ import com.dtolabs.rundeck.plugins.descriptions.RenderingOption;
 import com.dtolabs.rundeck.plugins.descriptions.TextArea;
 import com.dtolabs.rundeck.plugins.notification.NotificationPlugin;
 import liqp.Template;
-import org.bouncycastle.jce.provider.BouncyCastleProvider;
-import org.bouncycastle.util.io.pem.PemReader;
 
 import javax.net.ssl.HttpsURLConnection;
-import javax.net.ssl.KeyManager;
 import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
-import javax.net.ssl.SSLSocketFactory;
 import javax.net.ssl.TrustManagerFactory;
 import java.io.ByteArrayInputStream;
 import java.io.DataOutputStream;
-import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.InputStreamReader;
 import java.net.URL;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
-import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.security.KeyFactory;
 import java.security.KeyStore;
-import java.security.PrivateKey;
-import java.security.SecureRandom;
-import java.security.Security;
 import java.security.cert.Certificate;
 import java.security.cert.CertificateFactory;
-import java.security.cert.X509Certificate;
-import java.security.spec.PKCS8EncodedKeySpec;
-import java.util.ArrayList;
-import java.util.Base64;
-import java.util.Base64.Decoder;
-import java.util.List;
+import java.util.Collection;
 import java.util.Map;
 import java.util.Objects;
 import java.util.regex.Matcher;
@@ -231,33 +214,32 @@ public class DIYWebhookNotificationPlugin implements NotificationPlugin {
     return true;
   }
 
-  private SSLSocketFactory setSocketFactory(HttpsURLConnection httpsURLConnection) throws Exception {
-    Security.addProvider(new BouncyCastleProvider());
-    SSLContext context = SSLContext.getInstance("TLS");
-    String certAndKey = new String(Files.readAllBytes(Paths.get(sslCertificatePath)));
-    String delimiter = "-----END CERTIFICATE-----";
-    String[] tokens = certAndKey.split(delimiter);
-    byte[] certBytes = tokens[0].concat(delimiter).getBytes();
-    byte[] keyBytes = tokens[1].getBytes();
-    PemReader reader;
-    reader = new PemReader(new InputStreamReader(new ByteArrayInputStream(certBytes)));
-    X509Certificate cert = (X509Certificate) CertificateFactory.getInstance("X.509").generateCertificate(
-        new ByteArrayInputStream(reader.readPemObject().getContent())
-    );
-    reader.close();
-    reader = new PemReader(new InputStreamReader(new ByteArrayInputStream(keyBytes)));
-    KeyFactory factory = KeyFactory.getInstance("RSA");
-    byte[] content = reader.readPemObject().getContent();
-    PKCS8EncodedKeySpec privKeySpec = new PKCS8EncodedKeySpec(content);
-    PrivateKey key = factory.generatePrivate(privKeySpec);
-    KeyStore keystore = KeyStore.getInstance("JKS");
-    keystore.load(null);
-    keystore.setCertificateEntry("cert-alias", cert);
-    keystore.setKeyEntry("key-alias", key, "changeit".toCharArray(), new Certificate[] {cert});
-    KeyManagerFactory kmf = KeyManagerFactory.getInstance("SunX509");
-    kmf.init(keystore, "changeit".toCharArray());
-    KeyManager[] km = kmf.getKeyManagers();
-    context.init(km, null, null);
-    return context.getSocketFactory();
+  private void setSocketFactory(HttpsURLConnection connection) throws Exception {
+    CertificateFactory certificateFactory = CertificateFactory.getInstance("X.509");
+    Collection<? extends Certificate> certificates = certificateFactory.generateCertificates(new ByteArrayInputStream(
+        Files.readAllBytes(Paths.get(sslCertificatePath))
+    ));
+    if (certificates.isEmpty()) {
+      throw new IllegalArgumentException("expected non-empty set of trusted certificates");
+    }
+    char[] password = "password".toCharArray(); // Any password will work.
+    KeyStore keyStore = KeyStore.getInstance(KeyStore.getDefaultType());
+    InputStream in = null; // By convention, 'null' creates an empty key store.
+    keyStore.load(in, password);
+    int index = 0;
+    for (Certificate certificate : certificates) {
+      String certificateAlias = Integer.toString(index++);
+      keyStore.setCertificateEntry(certificateAlias, certificate);
+    }
+    // Use it to build an X509 trust manager.
+    KeyManagerFactory keyManagerFactory = KeyManagerFactory.getInstance(
+        KeyManagerFactory.getDefaultAlgorithm());
+    keyManagerFactory.init(keyStore, password);
+    TrustManagerFactory trustManagerFactory = TrustManagerFactory.getInstance(
+        TrustManagerFactory.getDefaultAlgorithm());
+    trustManagerFactory.init(keyStore);
+    SSLContext sslContext = SSLContext.getInstance("TLS");
+    sslContext.init(keyManagerFactory.getKeyManagers(), trustManagerFactory.getTrustManagers(), null);
+    connection.setSSLSocketFactory(sslContext.getSocketFactory());
   }
 }
